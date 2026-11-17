@@ -119,6 +119,26 @@ gsutil cp my_dag.py "$(terraform output -raw dag_gcs_prefix)/"
 
 ---
 
+## Migrating from Composer 2
+
+This baseline came out of a Composer 2 → Composer 3 migration. The environment had been built by hand in the console, so the new one was rebuilt as code, run **side by side** with Composer 2, and cut over DAG by DAG once each one was validated.
+
+Checklist for converting DAGs to Airflow 3:
+
+- [ ] `schedule_interval=` → `schedule=`
+- [ ] `execution_date` → `logical_date` (in task code **and** Jinja templates)
+- [ ] `from airflow import DAG` → `from airflow.sdk import DAG`
+- [ ] Core operators → standard provider, e.g. `airflow.operators.python` → `airflow.providers.standard.operators.python`
+- [ ] Set `catchup` explicitly on every DAG: it now defaults to `False`, and nothing errors if a DAG silently stops backfilling
+
+Before creating the environment:
+
+- [ ] Audit every pinned PyPI package. Some Airflow 2-era pins won't resolve on `composer-3-airflow-3` (for example, `apache-beam==2.61.0` had to be removed)
+- [ ] Recreate Airflow connections and variables in the new environment (ideally from Secret Manager rather than by hand)
+- [ ] Leave Composer 2 running untouched until every DAG has been validated on Composer 3
+
+---
+
 ## Inputs
 
 | Name | Description | Type | Default | Required |
