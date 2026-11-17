@@ -1,228 +1,181 @@
+# Cloud Composer 3 on GCP with Terraform
 
-# Terraform Module: Cloud Composer 3
+A small, readable Terraform configuration that deploys **Google Cloud Composer 3** (managed **Apache Airflow 3**) with sensible defaults: the required APIs, a dedicated VPC and subnet, a purpose-built service account, and an explicitly sized Composer environment.
 
-This module deploys a production-ready **Google Cloud Composer 3** (managed Apache Airflow 3) environment on GCP. It handles everything end-to-end: enabling required APIs, creating a dedicated VPC and subnet, provisioning a service account with least-privilege permissions, and standing up the Composer environment itself.
-
-> **Target audience:** Engineers deploying or maintaining Airflow-based data pipelines on GCP.
-
----
-
-## What This Module Creates
-
-| Resource | Description |
-|---|---|
-| `google_composer_environment` | Composer 3 environment running Airflow 3 |
-| `google_compute_network` | Dedicated VPC for the Composer environment |
-| `google_compute_subnetwork` | Subnet within the VPC |
-| `google_service_account` | Least-privilege SA attached to Composer nodes |
-| GCP APIs | All required APIs enabled automatically |
+It is deliberately minimal: a baseline you can read in ten minutes, deploy as-is, and extend.
 
 ---
 
-## Architecture
+## What it creates
+
+| Resource | Name (defaults) | Purpose |
+|---|---|---|
+| `google_project_service` × 2 | `composer.googleapis.com`, `compute.googleapis.com` | Enables the APIs Composer needs |
+| `google_compute_network` | `composer3-vpc` | Dedicated VPC (custom subnets only), so Composer doesn't use the default network |
+| `google_compute_subnetwork` | `composer3-subnet` (`10.10.0.0/24`) | Subnet for Composer workloads, with Private Google Access on |
+| `google_service_account` | `composer3-sa` | Identity the Composer workloads run as |
+| `google_project_iam_member` | `roles/composer.worker` | The single role Composer 3 needs to run |
+| `google_composer_environment` | `var.environment_name` | Composer 3 environment on `composer-3-airflow-3` |
 
 ```mermaid
 graph TD
-    subgraph GCP Project
-        subgraph VPC["Custom VPC (composer_vpc)"]
-            subgraph Subnet["Subnet (composer_subnet)"]
-                subgraph Composer["Cloud Composer 3 Environment"]
-                    SCH["Schedulers x2\n1 CPU / 2GB RAM"]
-                    WEB["Web Server\n1 CPU / 2GB RAM"]
-                    WRK["Workers (1–3)\n2 CPU / 4GB RAM"]
+    subgraph Project["GCP project"]
+        APIS["Enabled APIs<br/>composer, compute"]
+        SA["Service account<br/>composer3-sa<br/>roles/composer.worker"]
+        subgraph VPC["VPC: composer3-vpc"]
+            subgraph Subnet["Subnet: composer3-subnet (10.10.0.0/24)"]
+                subgraph Composer["Cloud Composer 3 (Airflow 3)"]
+                    SCH["Schedulers × 2<br/>1 vCPU / 2 GB"]
+                    WEB["Web server<br/>1 vCPU / 2 GB"]
+                    WRK["Workers 1–3 (autoscaled)<br/>2 vCPU / 4 GB"]
                 end
             end
         end
-        SA["Service Account\n(composer_sa)"]
-        APIS["Enabled APIs\nComposer, IAM, Compute..."]
     end
-
-    SA --> Composer
-    APIS --> Composer
+    APIS -. enabled before .-> Composer
+    SA -- runs as --> Composer
 ```
-
-The Composer environment runs inside a **private VPC** with a dedicated subnet, using a custom service account — nothing shares infrastructure with other GCP services in the project.
 
 ---
 
 ## Prerequisites
 
-Before applying this module, make sure you have:
-
-- [ ] **Terraform >= 1.3** installed (`terraform -version`)
-- [ ] **`google-beta` provider** access — this module uses beta Composer features
-- [ ] **GCP project** with billing enabled
-- [ ] **Permissions** — your account needs at minimum:
+- Terraform **>= 1.5**
+- A GCP project with billing enabled
+- A GCS bucket for Terraform state
+- Your account (or CI identity) needs at least:
   - `roles/composer.admin`
   - `roles/compute.networkAdmin`
   - `roles/iam.serviceAccountAdmin`
-- [ ] **GCS bucket** for Terraform remote state (referenced in `backend.tf`)
-- [ ] Authenticated via `gcloud auth application-default login`
+  - `roles/resourcemanager.projectIamAdmin` (to grant the worker role)
+  - `roles/serviceusage.serviceUsageAdmin` (to enable APIs)
+- Authenticated locally: `gcloud auth application-default login`
 
 ---
 
 ## Usage
 
-### Basic Example
+This repo is a **root configuration**: you deploy it directly. Each environment has a backend file (where state lives) and a tfvars file (what to deploy).
 
-```hcl
-module "composer3" {
-  source = "./modules/composer3"
-
-  project_id       = "your-gcp-project-id"
-  region           = "europe-west2"
-  environment_name = "dev"
-}
+```
+envs/
+├── sandbox.gcs.tfbackend        # state bucket + prefix for sandbox
+├── sandbox.tfvars               # sandbox settings
+├── prod.gcs.tfbackend.example   # copy → prod.gcs.tfbackend
+└── prod.tfvars.example          # copy → prod.tfvars
 ```
 
-### With Custom Values (`terraform.tfvars`)
-
-```hcl
-project_id       = "my-data-platform-prod"
-region           = "europe-west2"
-environment_name = "production"
-```
-
-### Deploy Steps
+### Deploy
 
 ```bash
-# 1. Initialise (downloads providers, connects to remote state)
-terraform init
+# 1. Initialise against the environment's state
+terraform init -backend-config=envs/sandbox.gcs.tfbackend
 
-# 2. Preview what will be created
-terraform plan -var-file="terraform.tfvars"
+# 2. Review the plan
+terraform plan -var-file=envs/sandbox.tfvars
 
-# 3. Apply (Composer takes ~20–30 mins to provision)
-terraform apply -var-file="terraform.tfvars"
+# 3. Apply (Composer takes roughly 20–30 minutes to provision)
+terraform apply -var-file=envs/sandbox.tfvars
+
+# 4. Get the Airflow URL and DAG bucket
+terraform output
 ```
 
-> ⏱ **Note:** Cloud Composer environments typically take **20–30 minutes** to fully provision. This is expected — the GCP API handles the orchestration in the background.
+### Add another environment
+
+```bash
+cp envs/prod.tfvars.example envs/prod.tfvars
+cp envs/prod.gcs.tfbackend.example envs/prod.gcs.tfbackend
+# edit both files, then:
+terraform init -reconfigure -backend-config=envs/prod.gcs.tfbackend
+terraform plan -var-file=envs/prod.tfvars
+```
+
+To run two environments **in the same project**, give each a different `resource_prefix` so the VPC, subnet and service account names don't collide.
+
+### Deploy DAGs
+
+```bash
+gsutil cp my_dag.py "$(terraform output -raw dag_gcs_prefix)/"
+```
 
 ---
 
-## Installed Python Packages
+## Design choices
 
-The following PyPI packages are pre-installed in the Composer environment:
+- **Dedicated network.** Composer gets its own VPC and subnet rather than the project's default network, giving clear boundaries for firewall rules, peering, and connectivity to source systems. Set `enable_private_environment = true` to run without public IPs on the workloads.
+- **Least-privilege identity.** Composer runs as its own service account with only `roles/composer.worker`, not the default Compute Engine account. Grant data-access roles (BigQuery, GCS, Secret Manager) separately, scoped to what your DAGs use.
+- **Explicit sizing.** Scheduler, web server and worker resources are stated in code, so changes are reviewed like any other change.
 
-| Package | Version | Purpose |
-|---|---|---|
-| `pymssql` | 2.3.2 | SQL Server connectivity |
-| `pandas` | 2.2.3 | Data manipulation |
+  | Component | CPU | Memory | Storage | Count |
+  |---|---|---|---|---|
+  | Scheduler | 1 | 2 GB | 5 GB | 2 |
+  | Web server | 1 | 2 GB | 5 GB | 1 |
+  | Worker | 2 | 4 GB | 10 GB | `worker_min_count`–`worker_max_count` (default 1–3) |
 
-To add more packages, update the `pypi_packages` block in `main.tf` and re-apply.
-
----
-
-## Workload Sizing
-
-| Component | CPU | Memory | Storage | Count |
-|---|---|---|---|---|
-| Scheduler | 1 | 2 GB | 5 GB | 2 |
-| Web Server | 1 | 2 GB | 5 GB | 1 |
-| Worker | 2 | 4 GB | 10 GB | 1–3 (autoscaled) |
-
-Workers scale automatically between 1 and 3 based on DAG queue depth.
+- **Pinned dependencies.** PyPI packages are pinned through `pypi_packages` (defaults: `pymssql==2.3.2`, `pandas==2.2.3`), so a package release can't silently break DAGs.
+- **Explicit ordering.** The environment `depends_on` the APIs and the IAM grant, so a first apply on a new project doesn't race API enablement.
+- **APIs stay enabled on destroy** (`disable_on_destroy = false`), so tearing down Composer doesn't break other workloads in the project.
 
 ---
 
 ## Inputs
 
-<!-- BEGIN_TF_DOCS -->
-
 | Name | Description | Type | Default | Required |
-|---|---|---|---|---|
-| `project_id` | The GCP project ID | `string` | `"samrats-sandbox"` | no |
-| `region` | The GCP region to deploy into | `string` | `"europe-west2"` | no |
-| `environment_name` | The name of the Composer environment | `string` | `"dev"` | no |
-
-<!-- END_TF_DOCS -->
-
----
+|---|---|---|---|:---:|
+| `project_id` | GCP project ID to deploy into | `string` | n/a | **yes** |
+| `region` | Region for Composer and its subnet | `string` | `"europe-west2"` | no |
+| `environment_name` | Composer environment name; also exposed to DAGs as `ENVIRONMENT` | `string` | `"dev"` | no |
+| `resource_prefix` | Prefix for VPC, subnet and service account names | `string` | `"composer3"` | no |
+| `subnet_cidr` | Primary IP range of the subnet | `string` | `"10.10.0.0/24"` | no |
+| `enable_private_environment` | Run Composer 3 without public IPs on workloads | `bool` | `false` | no |
+| `pypi_packages` | PyPI packages, name ⇒ version specifier | `map(string)` | `pymssql`, `pandas` pinned | no |
+| `worker_min_count` | Minimum Airflow workers | `number` | `1` | no |
+| `worker_max_count` | Maximum Airflow workers | `number` | `3` | no |
+| `labels` | Extra labels for the environment | `map(string)` | `{}` | no |
 
 ## Outputs
 
-> Run `terraform output` after apply to retrieve values.
-
-<!-- Add outputs here once defined in outputs.tf -->
-
----
-
-## File Structure
-
-```
-composer3/
-├── main.tf            # Composer environment resource
-├── networking.tf      # VPC and subnet
-├── service_accounts.tf# IAM service account
-├── apis.tf            # GCP API enablement
-├── providers.tf       # google-beta provider config
-├── backend.tf         # Remote state (GCS)
-└── variables.tf       # Input variables
-```
-
----
-
-## Common Issues
-
-**Composer environment stuck in `CREATING` state**
-This is normal — wait up to 30 minutes. If it exceeds that, check the GCP Console under **Composer > Environments** for error details.
-
-**API not enabled error on first apply**
-The `apis.tf` enables required APIs, but GCP can take 1–2 minutes to propagate. Re-run `terraform apply` if you hit this on a brand new project.
-
-**Permission denied on service account creation**
-Ensure your account has `roles/iam.serviceAccountAdmin` in the target project.
-
----
-
-## Maintainer
-
-| Field | Value |
+| Name | Description |
 |---|---|
-| Module | `composer3` |
-| Environment | `sandbox → dev → prod` |
-| GCP Region | `europe-west2` (London) |
+| `environment_name` | Name of the Composer environment |
+| `airflow_uri` | URL of the Airflow web UI |
+| `dag_gcs_prefix` | GCS path to upload DAGs to |
+| `service_account_email` | Service account Composer runs as |
+| `network_id` | ID of the dedicated VPC |
+| `subnetwork_id` | ID of the Composer subnet |
 
+---
 
-## Requirements
+## Files
 
-| Name | Version |
-|------|---------|
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.5.0 |
-| <a name="requirement_google"></a> [google](#requirement\_google) | ~> 6.0 |
-| <a name="requirement_google-beta"></a> [google-beta](#requirement\_google-beta) | ~> 6.0 |
+```
+.
+├── main.tf               # Composer 3 environment
+├── networking.tf         # VPC and subnet
+├── service_accounts.tf   # Service account and IAM role
+├── apis.tf               # API enablement
+├── providers.tf          # google / google-beta provider config
+├── backend.tf            # GCS backend (configured per environment)
+├── variables.tf          # Inputs
+├── outputs.tf            # Outputs
+├── envs/                 # Per-environment backend and tfvars files
+├── .tflint.hcl           # Lint rules
+└── .github/workflows/    # CI: fmt, validate, tflint on every PR
+```
 
-## Providers
+---
 
-| Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | 6.50.0 |
-| <a name="provider_google-beta"></a> [google-beta](#provider\_google-beta) | 6.50.0 |
+## Troubleshooting
 
-## Modules
+**Environment stays in `CREATING` for a long time.** Normal: allow up to 30 minutes. If it goes beyond that, check **Composer → Environments** in the Cloud Console for the error.
 
-No modules.
+**Permission denied creating the service account or IAM binding.** Check your account has the roles listed under Prerequisites.
 
-## Resources
+**`environment_name` changed and the plan wants to replace the environment.** Composer environment names can't be changed in place; renaming means a full rebuild.
 
-| Name | Type |
-|------|------|
-| [google-beta_google_composer_environment.composer3](https://registry.terraform.io/providers/hashicorp/google-beta/latest/docs/resources/google_composer_environment) | resource |
-| [google_compute_network.composer_vpc](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_network) | resource |
-| [google_compute_subnetwork.composer_subnet](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_subnetwork) | resource |
-| [google_project_iam_member.composer_worker](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
-| [google_project_service.composer_api](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_service) | resource |
-| [google_project_service.compute_api](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_service) | resource |
-| [google_service_account.composer_sa](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account) | resource |
+---
 
-## Inputs
+## License
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| <a name="input_environment_name"></a> [environment\_name](#input\_environment\_name) | The name of the environment | `string` | `"dev"` | no |
-| <a name="input_project_id"></a> [project\_id](#input\_project\_id) | The GCP project ID | `string` | `"samrats-sandbox"` | no |
-| <a name="input_region"></a> [region](#input\_region) | The GCP region | `string` | `"europe-west2"` | no |
-
-## Outputs
-
-No outputs.
+See [LICENSE](LICENSE).

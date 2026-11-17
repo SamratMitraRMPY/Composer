@@ -1,8 +1,21 @@
+# Local Terraform working files
 .terraform/
 *.tfstate
-*.tfstate.backup
+*.tfstate.*
 crash.log
+crash.*.log
 override.tf
 override.tf.json
-.terraform.lock.hcl
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Real environment files (commit only the *.example versions)
+envs/prod.tfvars
+envs/prod.gcs.tfbackend
+
+# Tool downloads
 terraform-docs.tar.gz
+
+# Note: .terraform.lock.hcl is intentionally committed so every run uses the same provider versions.

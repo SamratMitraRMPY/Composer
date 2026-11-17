@@ -1,0 +1,13 @@
+# Copy to prod.tfvars and fill in your values.
+project_id       = "your-prod-project-id"
+region           = "europe-west2"
+environment_name = "prod"
+
+enable_private_environment = true
+
+worker_min_count = 1
+worker_max_count = 3
+
+labels = {
+  team = "data-platform"
+}
